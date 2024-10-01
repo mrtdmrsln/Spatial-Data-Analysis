@@ -24,11 +24,9 @@ library(spDataLarge)
 library(here)
 library(tidygeocoder)
 library(mapview)
-library(raster)
-library(lattice)
-library(leafpop)
-library(viridis)
-library(devtools)
+library(lmtest)
+library(sandwich)
+library(xlsx)
 
 ph_df <- read.csv('2016-01-01-2024-01-01-Philippines.csv')
 
@@ -41,6 +39,11 @@ ph_df <- read.csv('2016-01-01-2024-01-01-Philippines.csv')
 ph16_23 = ph_df %>%
   mutate(event_date = as.Date(event_date, format = "%d %B %Y")) %>% 
   filter(event_date >= as.Date("2016-06-30") & event_date <= as.Date("2023-06-30")) 
+
+new_cont <- ph16_23[1:200,]
+
+write.xlsx(new_cont,here("new_cont.xlsx"), sheetName = "Sheet1", col.names = TRUE, row.names = T)
+
 ```
 
 ```{r}
@@ -195,25 +198,7 @@ labs(title = "Armed Interactions Between CPP-NPA-NDF and Philippine State Forces
 ```
 
 ```{r}
-ggmap(philippines_map)+
-geom_point(aes(x=longitude,y=latitude, col=event_type),data=ph16_23,alpha = 1) +
-scale_size(range = c(0.1, 2)) +
-  theme_void() +
-labs(title = "Event Types in Between 2016-2023",
-       subtitle = "30 June 2016 - 30 June 2023",
-       caption = "source: https://acleddata.com/")
-```
 
-```{r}
-# Create raster for high density regions
-rasterphil <- ne_states(country = "Philippines", returnclass = "sf")
-
-selected_regions <- rasterphil %>%
-  filter(region %in% c("National Capital Region", "Western Visayas (Region VI)", "Northern Mindanao (Region X)"))
-selected_regions <- selected_regions[c(14, 20, 9), ] 
-selected_regions_1 <- selected_regions %>% filter(grepl('PH-NEC', iso_3166_2)) %>% mutate(col_regions_raster = '#f8bc94')
-selected_regions_2 <- selected_regions %>% filter(grepl('PH-BUK', iso_3166_2)) %>% mutate(col_regions_raster = '#98b4bc')
-selected_regions_3 <- selected_regions %>% filter(iso_3166_2 == "PH-MNL") %>% mutate(col_regions_raster = 'green')
 
 # view data
 head(ph_armed, 3)
@@ -222,39 +207,48 @@ mapview(mymap, color = "black", col.regions = "#103444",
         cex = sqrt(density_admin3$count), # Use cex for size scaling
         cex.range = c(0,1),
         alpha.regions = 1, legend = TRUE,
-        homebutton = FALSE, map.types = "OpenStreetMap")+
-  mapview(selected_regions_1, layer.name = "Western Wisayas", color = "black", col.regions = '#f8bc94', lwd = 2) +
-  mapview(selected_regions_2, layer.name = "Northern Mindanao", color = "black", col.regions = '#98b4bc', lwd = 2) +
-  mapview(selected_regions_3, layer.name = "Manila", color = "white", col.regions = 'green', lwd = 2)
+        homebutton = FALSE, map.types = "OpenStreetMap")
+
+
 
 ```
 
 # graph 2
 
 ```{r}
+# Assuming `ph_armed` is your data frame with the event data
 
-# Armed Interactions Between CPP-NPA-NDF and Philippine State Forces
-
+# Convert event_date to Date type
 armed_hist <- ph_armed %>%
   mutate(event_date = as.Date(event_date))
+
+# Add presidents based on the event_date
+armed_hist <- armed_hist %>%
+  mutate(president = case_when(
+    event_date >= as.Date("2016-06-30") & event_date <= as.Date("2022-06-30") ~ "Rodrigo Duterte",
+    event_date > as.Date("2022-06-30") ~ "Bongbong Marcos",
+    TRUE ~ "Unknown"
+  ))
 
 # Extract month from event_date
 armed_hist <- armed_hist %>%
   mutate(month = format(event_date, "%Y-%m"))
 
-# Count the number of events per month
+# Count the number of events per month and by president
 events_per_month <- armed_hist %>%
-  group_by(month) %>%
-  summarise(num_events = n())
+  group_by(month, president) %>%
+  summarise(num_events = n(), .groups = 'drop')
 
 unique_months <- events_per_month %>%
   pull(month)
+
 # Plot the histogram
-ggplot(events_per_month, aes(x = month, y = num_events)) +
-  geom_bar(stat = "identity") +
+ggplot(events_per_month, aes(x = month, y = num_events, fill = president)) +
+  geom_bar(stat = "identity", position = "dodge") +
   scale_x_discrete(breaks = unique_months, labels = function(x) substr(x, 1, 4)) +
   labs(title = "Number of Events by Month", x = "Year", y = "Number of Events") +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
 ```
 
 # Map 2
@@ -342,5 +336,107 @@ labs(title = "Violence targeting Civilians Related to Red-Tagging",
        caption = "source: https://acleddata.com/")
 
 
+
+
+```
+
+## RDD Analysis of the duty change effect on num of events
+
+```{r}
+
+
+
+
+# Convert event_date to Date type
+armed_hist <- ph_armed %>%
+  mutate(event_date = as.Date(event_date))
+
+# Define the threshold date
+threshold_date <- as.Date("2022-06-30")
+
+# Create the running variable (days from threshold)
+armed_hist <- armed_hist %>%
+  mutate(days_from_threshold = as.numeric(event_date - threshold_date))
+
+# Create a binary treatment variable
+armed_hist <- armed_hist %>%
+  mutate(treatment = ifelse(event_date > threshold_date, 1, 0))
+
+# Count the number of events per day
+events_per_day <- armed_hist %>%
+  group_by(event_date, days_from_threshold, treatment) %>%
+  summarise(num_events = n(), .groups = 'drop')
+
+# Fit a linear regression model with interaction term
+model <- lm(num_events ~ days_from_threshold * treatment, data = events_per_day)
+
+# Robust standard errors
+robust_se <- coeftest(model, vcov = vcovHC(model, type = "HC1"))
+
+# Print model summary with robust standard errors
+print(robust_se)
+
+# Plot the results
+ggplot(events_per_day, aes(x = days_from_threshold, y = num_events, color = as.factor(treatment))) +
+  geom_point() +
+  geom_vline(xintercept = 0, col = "blue",lwd = 1)+
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Regression Discontinuity Analysis on President Change",
+       x = "Days from Threshold",
+       y = "Number of Events",
+       color = "Treatment") +
+  theme_minimal()
+
+```
+
+```{r}
+#BANDWITH -
+
+
+
+# Convert event_date to Date type
+armed_hist <- ph_armed %>%
+  mutate(event_date = as.Date(event_date))
+
+# Define the threshold date
+threshold_date <- as.Date("2022-06-30")
+
+# Create the running variable (days from threshold)
+armed_hist <- armed_hist %>%
+  mutate(days_from_threshold = as.numeric(event_date - threshold_date))
+
+# Filter data to include only events within one month of the threshold date
+one_month <- 30
+bandwidth_data <- armed_hist %>%
+  filter(abs(days_from_threshold) <= one_month*7)
+
+# Create a binary treatment variable
+bandwidth_data <- bandwidth_data %>%
+  mutate(treatment = ifelse(event_date > threshold_date, 1, 0))
+
+# Count the number of events per day
+events_per_day <- bandwidth_data %>%
+  group_by(event_date, days_from_threshold, treatment) %>%
+  summarise(num_events = n(), .groups = 'drop')
+
+# Fit a linear regression model with interaction term
+model <- lm(num_events ~ days_from_threshold * treatment, data = events_per_day)
+
+# Robust standard errors
+robust_se <- coeftest(model, vcov = vcovHC(model, type = "HC1"))
+
+# Print model summary with robust standard errors
+print(robust_se)
+
+# Plot the results
+ggplot(events_per_day, aes(x = days_from_threshold, y = num_events, color = as.factor(treatment))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_vline(xintercept = 0, col = "blue",lwd = 1)+
+  labs(title = "Regression Discontinuity Analysis within 7 Month Bandwidth",
+       x = "Days from Threshold",
+       y = "Number of Events",
+       color = "Treatment") +
+  theme_minimal()
 
 ```
