@@ -1,0 +1,346 @@
+---
+title: "Phillippines"
+author: "SEF"
+date: "2024-05-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(webr)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(sf)
+library(spData)
+library(terra)
+library(rnaturalearth)
+library(ggmap)
+library(osmdata)
+library(spDataLarge)
+library(here)
+library(tidygeocoder)
+library(mapview)
+library(raster)
+library(lattice)
+library(leafpop)
+library(viridis)
+library(devtools)
+
+ph_df <- read.csv('2016-01-01-2024-01-01-Philippines.csv')
+
+```
+
+## Donut Chart
+
+```{r}
+# filter the dates
+ph16_23 = ph_df %>%
+  mutate(event_date = as.Date(event_date, format = "%d %B %Y")) %>% 
+  filter(event_date >= as.Date("2016-06-30") & event_date <= as.Date("2023-06-30")) 
+```
+
+```{r}
+# Num of NPA'S as an actor1
+ph_actor1 = ph16_23 %>% 
+filter(event_type == 'Violence against civilians'& grepl("NPA", actor1))
+
+head(ph_actor1)
+nrow(ph_actor1)
+
+
+
+```
+
+```{r}
+
+# Exclude NPA as an actor1 from data
+
+npa_noactor1 = ph16_23 %>%
+  anti_join(ph_actor1, by = 'event_id_cnty') %>% 
+  filter(event_type == 'Violence against civilians') 
+
+
+```
+
+```{r}
+
+# From npa_noactor1 find rows contain both NPA and civilian word
+
+
+
+#  Create logical matrices for each word
+contains_npa <- sapply(npa_noactor1, grepl, pattern = "NPA", ignore.case = TRUE)
+contains_civilian <- sapply(npa_noactor1, grepl, pattern = "Civilian", ignore.case = TRUE)
+
+# Check if both words appear in the same row (in any column)
+rows_with_both <- rowSums(contains_npa & contains_civilian) > 0
+
+# Count the rows that contain both words
+number_of_rows_with_both <- sum(rows_with_both)
+
+# Output the result
+number_of_rows_with_both
+
+# Filter the data frame to only include these rows
+observations_with_both <- npa_noactor1[rows_with_both, ]
+
+```
+
+```{r}
+
+# Merge two possible data frame for NPA and categorise
+
+Finalnpa = ph_actor1 %>% 
+  bind_rows(observations_with_both)
+
+npagraph <- Finalnpa %>%
+  mutate(Category = ifelse(grepl('Government|Forces', assoc_actor_2),
+                           'Current and Former State Actors',
+                           'Actors Unaffiliated with the State')) 
+  
+```
+
+```{r}
+  
+# unıque actor1 frequency
+  
+Finalnpa$assoc_actor_2 %>% 
+  table() %>% 
+  as.data.frame()
+```
+
+```{r}
+
+# prepare for donut chart
+
+npagraph <- Finalnpa %>%
+  mutate(Category = ifelse(grepl('Government|Forces', assoc_actor_2),
+                           'Current and Former State Actors',
+                           'Actors Unaffiliated with the State')) %>% 
+  group_by(Category) %>%
+  summarise(Frequency = n(), .groups = 'drop')
+
+total_frequency <- sum(npagraph$Frequency) 
+
+npagraph <- npagraph %>%
+  mutate(Percentage = Frequency / total_frequency * 100)  # Calculate percentage
+
+
+```
+
+```{r}
+
+#  donut chart
+
+npagraph$Category <- factor(npagraph$Category, levels = rev(levels(factor(npagraph$Category))))
+
+ggplot(npagraph, aes(x = "", y = Frequency, fill = Category)) +
+  geom_bar(stat = "identity", width = 0.4) +
+  geom_text(aes(label = sprintf("%d (%.1f%%)", Frequency, Percentage)), position = position_stack(vjust = 0.5)) +
+  scale_fill_brewer(palette = 'Set1') +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(title = "NPA Targeting of Civilians", subtitle = '30 June 2016 - 30 June 2023') +
+  annotate("text", x = 0, y = 0, label = "", size = 8, color = "white")+
+theme(legend.position = "none")
+
+```
+
+# Map 1
+
+```{r}
+# Armed Interactions Between CPP-NPA-NDF and Philippine State Forces
+ph_armed <- ph16_23 %>% 
+filter(interaction == 12 | interaction == 13,grepl("NPA", actor1) | grepl("NPA", actor2), grepl("Armed clash", sub_event_type))
+
+
+```
+
+```{r}
+# Point size based on num of events in Admin3
+
+density_admin3 <- ph_armed %>%
+  group_by(admin3) %>%
+  summarise(count = n(),
+            lon = longitude,  
+            lat = latitude)%>%
+  ungroup()
+
+
+```
+
+```{r}
+
+register_stadiamaps(key = "be6ee313-e559-41d3-b17c-8f4895d1c9dd")
+
+phil  = world[world$name_long == "Philippines", ]
+
+philippines_map <- get_stadiamap(bbox = c(left = 115,
+                                          bottom = 5, right = 134, top = 19), 
+                                  maptype = "stamen_terrain", 
+                                  zoom = 6)
+ggmap(philippines_map)+
+geom_point(aes(x=lon,y=lat,size = count),data=density_admin3,
+             color = "#103444", alpha = 1) +
+scale_size(range = c(0.1, 2), breaks = c(1, 10, 20, 32), labels = c("1", "10", "20", "32")) +
+  theme_void() +
+labs(title = "Armed Interactions Between CPP-NPA-NDF and Philippine State Forces",
+       subtitle = "30 June 2016 - 30 June 2023",
+       caption = "source: https://acleddata.com/")
+
+```
+
+```{r}
+ggmap(philippines_map)+
+geom_point(aes(x=longitude,y=latitude, col=event_type),data=ph16_23,alpha = 1) +
+scale_size(range = c(0.1, 2)) +
+  theme_void() +
+labs(title = "Event Types in Between 2016-2023",
+       subtitle = "30 June 2016 - 30 June 2023",
+       caption = "source: https://acleddata.com/")
+```
+
+```{r}
+# Create raster for high density regions
+rasterphil <- ne_states(country = "Philippines", returnclass = "sf")
+
+selected_regions <- rasterphil %>%
+  filter(region %in% c("National Capital Region", "Western Visayas (Region VI)", "Northern Mindanao (Region X)"))
+selected_regions <- selected_regions[c(14, 20, 9), ] 
+selected_regions_1 <- selected_regions %>% filter(grepl('PH-NEC', iso_3166_2)) %>% mutate(col_regions_raster = '#f8bc94')
+selected_regions_2 <- selected_regions %>% filter(grepl('PH-BUK', iso_3166_2)) %>% mutate(col_regions_raster = '#98b4bc')
+selected_regions_3 <- selected_regions %>% filter(iso_3166_2 == "PH-MNL") %>% mutate(col_regions_raster = 'green')
+
+# view data
+head(ph_armed, 3)
+mymap <- st_as_sf(density_admin3, coords = c("lon", "lat"), crs = 4326)
+mapview(mymap, color = "black", col.regions = "#103444",
+        cex = sqrt(density_admin3$count), # Use cex for size scaling
+        cex.range = c(0,1),
+        alpha.regions = 1, legend = TRUE,
+        homebutton = FALSE, map.types = "OpenStreetMap")+
+  mapview(selected_regions_1, layer.name = "Western Wisayas", color = "black", col.regions = '#f8bc94', lwd = 2) +
+  mapview(selected_regions_2, layer.name = "Northern Mindanao", color = "black", col.regions = '#98b4bc', lwd = 2) +
+  mapview(selected_regions_3, layer.name = "Manila", color = "white", col.regions = 'green', lwd = 2)
+
+```
+
+# graph 2
+
+```{r}
+
+# Armed Interactions Between CPP-NPA-NDF and Philippine State Forces
+
+armed_hist <- ph_armed %>%
+  mutate(event_date = as.Date(event_date))
+
+# Extract month from event_date
+armed_hist <- armed_hist %>%
+  mutate(month = format(event_date, "%Y-%m"))
+
+# Count the number of events per month
+events_per_month <- armed_hist %>%
+  group_by(month) %>%
+  summarise(num_events = n())
+
+unique_months <- events_per_month %>%
+  pull(month)
+# Plot the histogram
+ggplot(events_per_month, aes(x = month, y = num_events)) +
+  geom_bar(stat = "identity") +
+  scale_x_discrete(breaks = unique_months, labels = function(x) substr(x, 1, 4)) +
+  labs(title = "Number of Events by Month", x = "Year", y = "Number of Events") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+# Map 2
+
+```{r}
+
+# filter the dates for red tagging
+ph20_23 = ph_df %>%
+  mutate(event_date = as.Date(event_date, format = "%d %B %Y")) %>% 
+  filter(event_date >= as.Date("2020-01-1") & event_date <= as.Date("2023-06-30"))
+
+```
+
+```{r}
+# check the reported red tagging events with non zero fatalities  
+# to find results with fatality
+ph20_23_fatality = ph20_23 %>% 
+  filter(event_type == 'Violence against civilians' & grepl("tagging|tagged", notes), fatalities != '0') 
+
+# check the reported red tagging events with non zero fatalities
+# to find results with physical harm
+
+ph20_23_harm = ph20_23 %>% 
+  filter(event_type == 'Violence against civilians' & grepl("tagging|tagged", notes), fatalities == '0',sub_event_type != 'Abduction/forced disappearance') 
+
+
+```
+
+```{r}
+
+# merge the two data frame to find Violence targeting Civilians 
+# Related to Red-Tagging
+
+ph20_23_redV = ph20_23_fatality %>% 
+  bind_rows(ph20_23_harm)%>%
+  filter(inter1 != 2) %>% 
+  dplyr::select(event_date, actor1,inter1, location, longitude, latitude)
+
+
+```
+
+```{r}
+
+
+# view data interactive Fantasia
+head(ph20_23_redV, 3)
+
+
+# Assuming 'ph20_23_redV' is your data frame with longitude and latitude columns
+mymap2 <- st_as_sf(ph20_23_redV, coords = c("longitude", "latitude"), crs = 4326)
+
+# Since 'inter1' is a variable consisting of categorical data (1 and 3), ensure it's a factor
+mymap2$inter1 <- as.factor(mymap2$inter1)
+m = mymap2 %>% mutate(colordeneme = ifelse(grepl('1', inter1),
+                           '#c46424',
+                           '#2C4C5C'))
+# Generate the map
+mapview(m, color = "black", col.regions = m$colordeneme ,
+        alpha.regions = 0.8, legend = FALSE,
+        homebutton = FALSE, map.types = "OpenStreetMap")
+
+```
+
+```{r}
+#stadia phillipines
+register_stadiamaps(key = "be6ee313-e559-41d3-b17c-8f4895d1c9dd")
+
+phil  = world[world$name_long == "Philippines", ]
+
+philippines_map <- get_stadiamap(bbox = c(left = 115,
+                                          bottom = 5, right = 134, top = 19), 
+                                  maptype = "stamen_terrain", 
+                                  zoom = 6)
+
+
+ggmap(philippines_map)+
+geom_point(aes(x=longitude,y=latitude,color = as.factor(inter1)),data=ph20_23_redV,
+             size = 2, alpha = 1)+
+scale_color_manual(values = c("3" = "#2C4C5C", "1" = "#c46424"),
+                     labels = c("Unidentified Armed Group", "Military and Police Forces"),
+                     name = "Perpetrator") +
+theme_void() +
+labs(title = "Violence targeting Civilians Related to Red-Tagging",
+       subtitle = "January 2020 - June 2023",
+       caption = "source: https://acleddata.com/")
+
+
+
+```
